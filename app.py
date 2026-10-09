@@ -35,12 +35,13 @@ class DuckDuckGoSearchTool(BaseTool):
 
 
 def create_research_crew(topic: str) -> Crew:
-    try:
+  
+# Get API key securely
+try:
     api_key = st.secrets["GROQ_API_KEY"]
 except Exception:
     api_key = os.getenv("GROQ_API_KEY")
-    if not api_key:
-        raise ValueError("GROQ_API_KEY is missing.")
+
 
     llm = LLM(
         model=f"groq/{MODEL_NAME}",
