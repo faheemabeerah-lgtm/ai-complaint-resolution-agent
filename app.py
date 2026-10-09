@@ -483,6 +483,20 @@ Return only the customer-facing reply.
             )
 
         st.subheader("Customer Support Reply")
+        
+st.subheader("Customer Support Reply")
+
+if customer_reply and customer_reply.strip():
+    st.success("Customer reply generated successfully.")
+    st.write(customer_reply)
+else:
+    st.warning(
+        "The customer reply could not be generated. "
+        "Please try analyzing the complaint again."
+    )
+
+st.subheader("Support Ticket")
+
         st.text_area(
             "Generated reply",
             value=customer_reply,
