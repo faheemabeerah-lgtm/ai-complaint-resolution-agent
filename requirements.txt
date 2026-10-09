@@ -1,0 +1,5 @@
+streamlit==1.50.0
+crewai==1.15.23
+crewai-tools==1.15.23
+duckduckgo-search==8.1.1
+litellm>=1.77.0
