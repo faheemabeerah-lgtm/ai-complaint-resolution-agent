@@ -1,8 +1,8 @@
 
 import os
 import json
-import re
 import uuid
+import re
 import smtplib
 from email.message import EmailMessage
 from datetime import datetime, timezone
@@ -12,87 +12,118 @@ import streamlit as st
 from groq import Groq
 
 
-# ======================================================
-# 1. PAGE CONFIGURATION
-# ======================================================
+# ---------------- PAGE CONFIG ----------------
 
 st.set_page_config(
     page_title="AI Complaint Resolution Agent",
     page_icon="📩",
     layout="wide",
+    initial_sidebar_state="collapsed",
 )
 
-st.title("📩 AI Complaint Resolution Agent")
-st.caption("AI-powered complaint analysis, resolution and email support.")
+st.markdown("""
+<style>
+.block-container {
+    max-width: 1000px;
+    padding-top: 2rem;
+    padding-bottom: 3rem;
+}
+.main-title {
+    font-size: clamp(2rem, 5vw, 3.8rem);
+    font-weight: 800;
+    line-height: 1.15;
+    letter-spacing: -1px;
+}
+.subtitle {
+    color: #64748b;
+    font-size: 1.1rem;
+    margin-bottom: 2rem;
+}
+div[data-testid="stForm"] {
+    border: 1px solid #dedede;
+    border-radius: 16px;
+    padding: 1.4rem;
+}
+div.stButton > button,
+div.stFormSubmitButton > button {
+    border-radius: 10px;
+    min-height: 46px;
+    font-weight: 600;
+}
+div[data-baseweb="input"] input,
+div[data-baseweb="textarea"] textarea {
+    border-radius: 9px;
+}
+</style>
 
-POLICY_FILE = "company_policies.csv"
-ORDERS_FILE = "orders.csv"
+<div class="main-title">📩 AI Complaint Resolution Agent</div>
+<div class="subtitle">
+Submit a complaint for AI-assisted analysis, urgency assessment,
+and resolution planning.
+</div>
+""", unsafe_allow_html=True)
 
 
-# ======================================================
-# 2. SECRETS AND EMAIL CONFIGURATION
-# ======================================================
+# ---------------- SESSION STATE ----------------
 
-def get_secret(name, default=""):
+if "complaints" not in st.session_state:
+    st.session_state.complaints = []
+
+if "current_ticket" not in st.session_state:
+    st.session_state.current_ticket = None
+
+
+# ---------------- HELPERS ----------------
+
+def secret(name, default=""):
     try:
         value = st.secrets.get(name, default)
         if value:
             return str(value)
     except Exception:
         pass
-
     return os.getenv(name, default)
 
 
-def send_email(to_address, subject, body):
-    """Send an email using configured SMTP credentials."""
-
-    smtp_email = get_secret("SMTP_EMAIL")
-    smtp_password = get_secret("SMTP_APP_PASSWORD")
-
-    if not smtp_email or not smtp_password:
-        return False, (
-            "Email is not configured. Add SMTP_EMAIL and "
-            "SMTP_APP_PASSWORD to Streamlit Secrets."
+def load_csv(filename):
+    if not os.path.exists(filename):
+        raise FileNotFoundError(
+            f"{filename} is missing from the GitHub repository."
         )
+    return pd.read_csv(filename).fillna("")
+
+
+def send_email(recipient, subject, body):
+    sender = secret("SMTP_EMAIL")
+    password = secret("SMTP_APP_PASSWORD")
+
+    if not sender or not password:
+        return False, "Email is not configured in Streamlit Secrets."
 
     message = EmailMessage()
     message["Subject"] = subject
-    message["From"] = smtp_email
-    message["To"] = to_address
+    message["From"] = sender
+    message["To"] = recipient
     message.set_content(body)
 
     try:
         with smtplib.SMTP("smtp.gmail.com", 587, timeout=20) as server:
             server.starttls()
-            server.login(smtp_email, smtp_password)
+            server.login(sender, password)
             server.send_message(message)
-
-        return True, f"Email sent successfully to {to_address}."
-
+        return True, f"Email sent to {recipient}."
     except Exception as exc:
-        return False, (
-            "Email could not be sent. Check your SMTP settings. "
-            f"Details: {exc}"
-        )
+        return False, f"Email failed: {exc}"
 
 
-# ======================================================
-# 3. AI AND DATABASE HELPERS
-# ======================================================
-
-def get_groq_client():
-    api_key = get_secret("GROQ_API_KEY")
-
-    if not api_key:
-        raise ValueError(
-            "GROQ_API_KEY is missing from Streamlit Secrets."
-        )
-
-    return Groq(api_key=api_key)
+def get_client():
+    key = secret("GROQ_API_KEY")
+    if not key:
+        raise ValueError("GROQ_API_KEY is missing from Streamlit Secrets.")
+    return Groq(api_key=key)
 
 
-def ask_groq(client, prompt, temperature=0.3):
+def ask_ai(client, prompt, temperature=0.3):
     response = client.chat.completions.create(
         model="openai/gpt-oss-120b",
         messages=[
@@ -100,23 +131,19 @@ def ask_groq(client, prompt, temperature=0.3):
                 "role": "system",
                 "content": (
                     "You are a careful customer support assistant. "
-                    "Never invent verified facts or claim actions "
-                    "have been completed when they have not."
+                    "Do not invent order facts or claim actions are complete."
                 ),
             },
             {"role": "user", "content": prompt},
         ],
         temperature=temperature,
     )
-
     return (response.choices[0].message.content or "").strip()
 
 
-def extract_json(text):
-    text = text.strip()
-    text = re.sub(r"^```(?:json)?\s*", "", text)
+def parse_json(text):
+    text = re.sub(r"^```(?:json)?\s*", "", text.strip())
     text = re.sub(r"\s*```$", "", text)
-
     try:
         result = json.loads(text)
         if isinstance(result, dict):
@@ -125,323 +152,227 @@ def extract_json(text):
         pass
 
     match = re.search(r"\{.*\}", text, re.DOTALL)
-
     if match:
         result = json.loads(match.group(0))
         if isinstance(result, dict):
             return result
 
-    raise ValueError("The AI response was not valid JSON. Try again.")
-
-
-def load_csv(path):
-    if not os.path.exists(path):
-        raise FileNotFoundError(
-            f"{path} was not found. Upload it beside app.py on GitHub."
-        )
-
-    return pd.read_csv(path).fillna("")
+    raise ValueError("AI did not return valid JSON. Please try again.")
 
 
 def find_column(df, names):
-    columns = {
-        str(column).strip().lower().replace(" ", "_"): column
-        for column in df.columns
+    normalized = {
+        str(col).strip().lower().replace(" ", "_"): col
+        for col in df.columns
     }
-
     for name in names:
-        if name in columns:
-            return columns[name]
-
+        if name in normalized:
+            return normalized[name]
     return None
 
 
-def get_order(order_id, orders_df):
-    id_column = find_column(
-        orders_df,
-        ["order_id", "orderid", "order_number", "id"],
+def find_order(order_id, orders):
+    column = find_column(
+        orders, ["order_id", "orderid", "order_number", "id"]
     )
-
-    if id_column is None:
-        raise ValueError("orders.csv must contain an order_id column.")
-
-    matches = orders_df[
-        orders_df[id_column].astype(str).str.strip().str.lower()
-        == order_id.strip().lower()
-    ]
-
-    if matches.empty:
+    if not column or not order_id.strip():
         return None
 
-    return matches.iloc[0].to_dict()
+    rows = orders[
+        orders[column].astype(str).str.strip().str.lower()
+        == order_id.strip().lower()
+    ]
+    return None if rows.empty else rows.iloc[0].to_dict()
 
 
-def get_policy(complaint, policies_df):
-    category_column = find_column(
-        policies_df,
-        ["category", "issue_type", "complaint_type", "topic"],
+def find_policy(complaint, policies):
+    category_col = find_column(
+        policies, ["category", "issue_type", "complaint_type", "topic"]
     )
-    policy_column = find_column(
-        policies_df,
-        ["policy", "description", "policy_details", "rules"],
+    policy_col = find_column(
+        policies, ["policy", "description", "policy_details", "rules"]
     )
 
-    if category_column is None:
-        category_column = policies_df.columns[0]
-
-    if policy_column is None:
-        policy_column = policies_df.columns[-1]
+    if category_col is None:
+        category_col = policies.columns[0]
+    if policy_col is None:
+        policy_col = policies.columns[-1]
 
     text = complaint.lower()
-
     keyword_map = {
-        "Delivery": [
-            "delivery", "delayed", "late", "shipping", "tracking",
-        ],
+        "Delivery": ["delivery", "delayed", "late", "shipping", "tracking"],
         "Refund": ["refund", "money back", "reimbursement"],
-        "Damaged Product": [
-            "damaged", "broken", "defective", "faulty",
-        ],
-        "Missing Order": [
-            "missing order", "not received", "lost order",
-            "never arrived",
-        ],
+        "Damaged Product": ["damaged", "broken", "defective", "faulty"],
+        "Missing Order": ["missing order", "not received", "lost order"],
     }
 
-    selected = None
-
     for category, keywords in keyword_map.items():
-        if any(keyword in text for keyword in keywords):
-            selected = category
-            break
+        if any(word in text for word in keywords):
+            rows = policies[
+                policies[category_col].astype(str).str.strip().str.lower()
+                == category.lower()
+            ]
+            if not rows.empty:
+                row = rows.iloc[0]
+                return str(row[category_col]), str(row[policy_col])
 
-    if selected:
-        rows = policies_df[
-            policies_df[category_column].astype(str).str.strip().str.lower()
-            == selected.lower()
-        ]
-
-        if not rows.empty:
-            row = rows.iloc[0]
-            return str(row[category_column]), str(row[policy_column])
-
-    return (
-        "General",
-        json.dumps(
-            policies_df.to_dict(orient="records"),
-            ensure_ascii=False,
-            default=str,
-        ),
+    return "General", json.dumps(
+        policies.to_dict(orient="records"), ensure_ascii=False
     )
 
 
-# ======================================================
-# 4. LOAD DATABASES
-# ======================================================
+# ---------------- LOAD DATA ----------------
 
 try:
-    policies_df = load_csv(POLICY_FILE)
-    orders_df = load_csv(ORDERS_FILE)
+    policies_df = load_csv("company_policies.csv")
+    orders_df = load_csv("orders.csv")
 except Exception as exc:
-    st.error(f"Could not load company databases: {exc}")
+    st.error(f"Database error: {exc}")
     st.stop()
 
 
-# ======================================================
-# 5. COMPLAINT FORM
-# ======================================================
+# ---------------- TABS ----------------
 
-st.subheader("Submit a Customer Complaint")
-
-with st.form("complaint_form"):
-    customer_name = st.text_input(
-        "Customer Name",
-        placeholder="e.g. Ali",
-    )
-
-    customer_email = st.text_input(
-        "Customer Email Address",
-        placeholder="customer@example.com",
-    )
-
-    order_id = st.text_input(
-        "Order ID",
-        placeholder="e.g. ORD101",
-    )
-
-    complaint = st.text_area(
-        "Describe the Complaint",
-        placeholder=(
-            "My order is 10 days late. I contacted support twice "
-            "but have not received a response."
-        ),
-        height=150,
-    )
-
-    analyze_button = st.form_submit_button(
-        "Analyze Complaint",
-        type="primary",
-        use_container_width=True,
-    )
+submit_tab, dashboard_tab = st.tabs(
+    ["Submit Complaint", "Complaint Dashboard"]
+)
 
 
-# ======================================================
-# 6. ANALYZE AND CREATE TICKET
-# ======================================================
+# ---------------- SUBMIT COMPLAINT ----------------
 
-if analyze_button:
-    if not complaint.strip():
-        st.warning("Please enter the customer's complaint.")
-        st.stop()
+with submit_tab:
+    with st.form("complaint_form", clear_on_submit=False):
+        customer_name = st.text_input("Your name")
+        customer_email = st.text_input("Your email address")
+        subject = st.text_input("Complaint subject")
+        complaint = st.text_area(
+            "Describe your complaint",
+            height=150,
+        )
+        order_id = st.text_input(
+            "Order ID (optional)",
+            placeholder="e.g. ORD101",
+        )
 
-    try:
-        with st.spinner("Analyzing complaint and creating ticket..."):
-            client = get_groq_client()
+        submitted = st.form_submit_button(
+            "Submit Complaint",
+            use_container_width=False,
+        )
 
-            order_info = (
-                get_order(order_id, orders_df)
-                if order_id.strip()
-                else None
-            )
+    if submitted:
+        if not customer_name.strip():
+            st.warning("Please enter your name.")
+        elif not subject.strip():
+            st.warning("Please enter a complaint subject.")
+        elif not complaint.strip():
+            st.warning("Please describe your complaint.")
+        else:
+            try:
+                with st.spinner("Analyzing your complaint..."):
+                    client = get_client()
+                    order_info = find_order(order_id, orders_df)
+                    policy_category, policy = find_policy(
+                        subject + " " + complaint, policies_df
+                    )
 
-            policy_category, company_policy = get_policy(
-                complaint,
-                policies_df,
-            )
-
-            analysis_prompt = f"""
+                    analysis = parse_json(ask_ai(client, f"""
 Analyze this complaint.
 
-Complaint:
-{complaint}
+Subject: {subject}
+Complaint: {complaint}
+Verified order: {json.dumps(order_info, default=str)}
 
-Verified order information:
-{json.dumps(order_info, ensure_ascii=False, default=str)}
-
-Return only a JSON object with these keys:
+Return only JSON with:
 {{
-  "category": "complaint category",
-  "priority": "Low, Medium, or High",
-  "sentiment": "Positive, Neutral, or Negative",
-  "summary": "One concise sentence",
-  "requires_human_review": true
+ "category": "complaint category",
+ "priority": "Low, Medium, or High",
+ "sentiment": "Positive, Neutral, or Negative",
+ "summary": "One sentence summary",
+ "requires_human_review": true
 }}
+"""))
 
-Do not invent order facts.
-"""
-
-            analysis = extract_json(
-                ask_groq(client, analysis_prompt)
-            )
-
-            resolution_prompt = f"""
+                    resolution = parse_json(ask_ai(client, f"""
 Recommend a resolution for this complaint.
 
-Complaint:
-{complaint}
+Subject: {subject}
+Complaint: {complaint}
+Verified order: {json.dumps(order_info, default=str)}
+Relevant policy: {policy}
+Analysis: {json.dumps(analysis)}
 
-Verified order:
-{json.dumps(order_info, ensure_ascii=False, default=str)}
-
-Relevant company policy:
-{company_policy}
-
-Analysis:
-{json.dumps(analysis, ensure_ascii=False)}
-
-Return only JSON with these keys:
+Return only JSON with:
 {{
-  "recommended_action": "Next recommended action",
-  "reason": "Why this action is appropriate",
-  "policy_compliance": "Compliant, Non-compliant, or Needs verification",
-  "human_review_required": true,
-  "review_reason": "Reason for human review"
+ "recommended_action": "Next action",
+ "reason": "Reason",
+ "policy_compliance": "Compliant, Non-compliant, or Needs verification",
+ "human_review_required": true,
+ "review_reason": "Reason for review"
 }}
 
-Do not claim any action has already been completed.
-Do not promise an unapproved refund or replacement.
-Require human review before consequential action.
-"""
+Do not claim actions have been completed or promise an unapproved refund.
+"""))
 
-            resolution = extract_json(
-                ask_groq(client, resolution_prompt)
-            )
-
-            reply_prompt = f"""
+                    reply = ask_ai(client, f"""
 Write a polite, empathetic customer support reply.
 
-Customer name:
-{customer_name.strip() or "Customer"}
+Customer: {customer_name}
+Subject: {subject}
+Complaint: {complaint}
+Verified order: {json.dumps(order_info, default=str)}
+Recommended resolution: {json.dumps(resolution)}
 
-Complaint:
-{complaint}
+Explain the proposed next step. Do not claim an action has already
+been completed. Do not promise an unapproved refund or replacement.
+Return only the customer-facing reply.
+""", temperature=0.4)
 
-Verified order:
-{json.dumps(order_info, ensure_ascii=False, default=str)}
+                    if not reply:
+                        reply = (
+                            f"Dear {customer_name}, thank you for contacting us. "
+                            "We apologize for the inconvenience. Our support "
+                            "team will review your complaint and verify the "
+                            "details before confirming the next steps."
+                        )
 
-Company policy:
-{company_policy}
+                    ticket_id = (
+                        "TICKET-"
+                        + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+                        + "-"
+                        + uuid.uuid4().hex[:6].upper()
+                    )
 
-Recommended resolution:
-{json.dumps(resolution, ensure_ascii=False)}
+                    ticket = {
+                        "ticket_id": ticket_id,
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                        "customer_name": customer_name.strip(),
+                        "customer_email": customer_email.strip(),
+                        "subject": subject.strip(),
+                        "complaint": complaint.strip(),
+                        "order_id": order_id.strip(),
+                        "order_information": order_info,
+                        "policy_category": policy_category,
+                        "company_policy": policy,
+                        "analysis": analysis,
+                        "resolution": resolution,
+                        "customer_reply": reply,
+                        "status": "Open",
+                        "human_review_required": True,
+                    }
 
-Acknowledge the concern, apologize where appropriate, and explain
-the proposed next step. Do not claim an action has been completed.
-Do not promise an unapproved refund or replacement.
-Return only the customer-facing message.
-"""
+                    st.session_state.complaints.append(ticket)
+                    st.session_state.current_ticket = ticket
 
-            customer_reply = ask_groq(
-                client,
-                reply_prompt,
-                temperature=0.4,
-            )
+                    # Notify support when configured.
+                    support_email = secret("SUPPORT_EMAIL")
+                    if support_email:
+                        body = f"""
+New complaint submitted.
 
-            if not customer_reply:
-                customer_reply = (
-                    "Thank you for contacting us. We apologize for "
-                    "the inconvenience. Our support team needs to "
-                    "review your complaint and verify the details "
-                    "before confirming the next steps."
-                )
-
-            ticket_id = (
-                "TICKET-"
-                + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-                + "-"
-                + uuid.uuid4().hex[:6].upper()
-            )
-
-            ticket = {
-                "ticket_id": ticket_id,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "customer_name": customer_name.strip() or "Customer",
-                "customer_email": customer_email.strip(),
-                "customer_complaint": complaint.strip(),
-                "analysis": analysis,
-                "order_information": order_info,
-                "policy_category": policy_category,
-                "company_policy": company_policy,
-                "resolution": resolution,
-                "customer_reply": customer_reply,
-                "ticket_status": "Open",
-                "human_review_required": True,
-            }
-
-            # Save results before rendering the page.
-            st.session_state["complaint_result"] = ticket
-
-            # Notify support email automatically when a ticket is created.
-            support_email = get_secret("SUPPORT_EMAIL")
-
-            if support_email:
-                notification_body = f"""
-A new customer complaint has been submitted.
-
-Ticket ID: {ticket_id}
-Customer: {ticket["customer_name"]}
-Customer email: {customer_email.strip() or "Not provided"}
-Order ID: {order_id.strip() or "Not provided"}
+Ticket: {ticket_id}
+Customer: {customer_name}
+Customer email: {customer_email or "Not provided"}
+Subject: {subject}
 
 Complaint:
 {complaint}
@@ -452,71 +383,58 @@ Recommended resolution:
 Reason:
 {resolution.get("reason", "Please review this complaint.")}
 
-Ticket status: Open
+Status: Open
 Human review required: Yes
-
-This is an automated notification. Review the case before taking action.
 """
+                        ok, message = send_email(
+                            support_email,
+                            f"New Complaint: {ticket_id}",
+                            body,
+                        )
+                        ticket["admin_email_status"] = message
+                    else:
+                        ticket["admin_email_status"] = (
+                            "Not configured: add SUPPORT_EMAIL to Secrets."
+                        )
 
-                ok, message = send_email(
-                    support_email,
-                    f"New Complaint Ticket: {ticket_id}",
-                    notification_body,
-                )
+                    st.session_state.current_ticket = ticket
+                    st.success(
+                        f"Complaint submitted successfully! Ticket: {ticket_id}"
+                    )
 
-                ticket["admin_email_status"] = (
-                    message if ok else f"Notification failed: {message}"
-                )
-            else:
-                ticket["admin_email_status"] = (
-                    "Not configured: add SUPPORT_EMAIL to Streamlit Secrets."
-                )
-
-            st.session_state["complaint_result"] = ticket
-
-    except Exception as exc:
-        st.error("The complaint could not be processed.")
-        st.exception(exc)
+            except Exception as exc:
+                st.error("Unable to process the complaint.")
+                st.exception(exc)
 
 
-# ======================================================
-# 7. DISPLAY RESULTS AND EMAIL OPTIONS
-# ======================================================
+# ---------------- RESULTS AND CUSTOMER EMAIL ----------------
 
-ticket = st.session_state.get("complaint_result")
+ticket = st.session_state.current_ticket
 
 if ticket:
-    st.success("Complaint analysis completed!")
-
     st.divider()
-    st.subheader("Complaint Analysis")
+    st.header("Complaint Analysis")
 
-    analysis = ticket["analysis"]
+    a = ticket["analysis"]
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Category", str(a.get("category", "Unknown")))
+    c2.metric("Priority", str(a.get("priority", "Unknown")))
+    c3.metric("Sentiment", str(a.get("sentiment", "Unknown")))
 
-    col1, col2, col3 = st.columns(3)
-
-    col1.metric("Category", str(analysis.get("category", "Unknown")))
-    col2.metric("Priority", str(analysis.get("priority", "Unknown")))
-    col3.metric("Sentiment", str(analysis.get("sentiment", "Unknown")))
-
-    st.write("**Summary:**", analysis.get("summary", ""))
+    st.write("**Summary:**", a.get("summary", ""))
 
     with st.expander("View full complaint analysis"):
-        st.json(analysis)
+        st.json(a)
 
-    st.divider()
     st.subheader("Verified Order Information")
-
     if ticket["order_information"]:
         st.json(ticket["order_information"])
     else:
-        st.warning("No matching order was found. Verify the order ID.")
+        st.info("No matching order was found or no order ID was provided.")
 
-    st.divider()
     st.subheader("Relevant Company Policy")
     st.write(ticket["company_policy"])
 
-    st.divider()
     st.subheader("Recommended Resolution")
     st.json(ticket["resolution"])
 
@@ -525,94 +443,118 @@ if ticket:
         "has been automatically completed."
     )
 
-    st.divider()
     st.subheader("Customer Support Reply")
-
     st.text_area(
-        "Review the email message",
+        "Review the message before sending",
         value=ticket["customer_reply"],
         height=170,
         key=f"reply_{ticket['ticket_id']}",
     )
 
     st.subheader("📧 Email the Customer")
-
-    st.write(
-        "The message below will be sent to the customer when you "
-        "click the send button."
-    )
-
     recipient = st.text_input(
         "Customer email recipient",
-        value=ticket.get("customer_email", ""),
+        value=ticket["customer_email"],
         key=f"recipient_{ticket['ticket_id']}",
     )
-
-    confirm_customer_email = st.checkbox(
-        "I have checked the recipient and reviewed the message.",
-        key=f"confirm_customer_{ticket['ticket_id']}",
+    confirmed = st.checkbox(
+        "I checked the recipient and reviewed the message.",
+        key=f"confirm_{ticket['ticket_id']}",
     )
 
     if st.button(
         "Send Support Reply to Customer",
-        key=f"send_customer_{ticket['ticket_id']}",
-        type="primary",
+        key=f"send_{ticket['ticket_id']}",
     ):
-        if not recipient.strip() or "@" not in recipient:
-            st.error("Enter a valid customer email address.")
-        elif not confirm_customer_email:
-            st.warning("Confirm the recipient and message before sending.")
+        if "@" not in recipient or "." not in recipient:
+            st.error("Please enter a valid email address.")
+        elif not confirmed:
+            st.warning("Please confirm the recipient and message.")
         else:
-            reply = ticket["customer_reply"]
-
-            with st.spinner("Sending customer email..."):
-                ok, message = send_email(
-                    recipient.strip(),
-                    f"Customer Support Update - {ticket['ticket_id']}",
-                    reply,
-                )
-
+            ok, message = send_email(
+                recipient.strip(),
+                f"Support Update - {ticket['ticket_id']}",
+                ticket["customer_reply"],
+            )
             if ok:
                 st.success(message)
             else:
                 st.error(message)
 
-    st.divider()
     st.subheader("📬 Your Support Notification")
-
     st.write("**Ticket ID:**", ticket["ticket_id"])
-    st.write("**Status:**", ticket["ticket_status"])
+    st.write("**Status:**", ticket["status"])
     st.write(
         "**Notification status:**",
         ticket.get("admin_email_status", "Not available"),
     )
 
-    st.caption(
-        "The support notification is attempted automatically when a "
-        "ticket is created. If it fails, check the email settings."
-    )
-
-    st.divider()
-    st.subheader("Support Ticket Download")
-
-    ticket_json = json.dumps(
-        ticket,
-        indent=2,
-        ensure_ascii=False,
-        default=str,
-    )
-
     st.download_button(
         "Download Support Ticket (JSON)",
-        data=ticket_json,
+        data=json.dumps(ticket, indent=2, ensure_ascii=False, default=str),
         file_name=f"{ticket['ticket_id']}.json",
         mime="application/json",
-        use_container_width=True,
     )
 
-st.divider()
 
+# ---------------- DASHBOARD ----------------
+
+with dashboard_tab:
+    st.subheader("Complaint Dashboard")
+
+    complaints = st.session_state.complaints
+
+    if not complaints:
+        st.info(
+            "No complaints have been submitted in this session yet. "
+            "Submit a complaint to see it here."
+        )
+    else:
+        c1, c2 = st.columns(2)
+        c1.metric("Total Complaints", len(complaints))
+        c2.metric(
+            "Open Tickets",
+            sum(1 for item in complaints if item["status"] == "Open"),
+        )
+
+        dashboard_rows = []
+        for item in complaints:
+            dashboard_rows.append({
+                "Ticket ID": item["ticket_id"],
+                "Customer": item["customer_name"],
+                "Subject": item["subject"],
+                "Category": item["analysis"].get("category", ""),
+                "Priority": item["analysis"].get("priority", ""),
+                "Status": item["status"],
+            })
+
+        st.dataframe(
+            pd.DataFrame(dashboard_rows),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        selected_ticket = st.selectbox(
+            "View a ticket",
+            options=[item["ticket_id"] for item in complaints],
+        )
+
+        selected = next(
+            item for item in complaints
+            if item["ticket_id"] == selected_ticket
+        )
+
+        with st.expander("Selected complaint details"):
+            st.write("**Customer:**", selected["customer_name"])
+            st.write("**Email:**", selected["customer_email"])
+            st.write("**Subject:**", selected["subject"])
+            st.write("**Complaint:**", selected["complaint"])
+            st.write("**Resolution:**")
+            st.json(selected["resolution"])
+
+
+st.divider()
 st.caption(
-    "Prototype: Uses sample order and policy data. Verify all details "
-    "and obtain human approval before taking action."
+    "Prototype uses sample order and policy data. AI recommendations "
+    "may be incorrect and require human review."
 )
