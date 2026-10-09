@@ -33,13 +33,20 @@ class DuckDuckGoSearchTool(BaseTool):
         except Exception as exc:
             return f"Search failed: {exc}"
 
-
-def create_research_crew(topic: str) -> Crew:
-  
 # Get API key securely
 try:
     api_key = st.secrets["GROQ_API_KEY"]
 except Exception:
+    api_key = os.getenv("GROQ_API_KEY")
+
+if not api_key:
+    st.error("Groq API key is missing. Configure GROQ_API_KEY in Streamlit Secrets.")
+    st.stop()
+
+client = Groq(api_key=api_key)
+
+
+
     api_key = os.getenv("GROQ_API_KEY")
 
 
