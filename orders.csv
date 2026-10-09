@@ -1,0 +1,4 @@
+order_id,customer,status,days_late
+ORD101,Ali,Delayed,10
+ORD102,Sara,Delivered,0
+ORD103,Ahmed,Processing,0
